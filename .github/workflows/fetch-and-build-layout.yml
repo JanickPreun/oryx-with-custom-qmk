@@ -6,7 +6,7 @@ on:
       layout_id:
         description: "Layout id available in URL https://configure.zsa.io/voyager/layouts/[ID_IS_HERE]/latest"
         required: true
-        default: "g7jjw"
+        default: "ZGMw7"
       layout_geometry:
         description: "Keyboard type"
         type: choice
@@ -27,6 +27,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: oryx-layout-update
+  cancel-in-progress: false
+
 jobs:
   fetch-and-build-layout:
     runs-on: ubuntu-latest
@@ -35,10 +39,25 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v5
         with:
-          ref: oryx
+          ref: main
+          fetch-depth: 0
 
-      - name: Download the full history for the merge to work correctly
-        run: git pull --unshallow
+      - name: Check main and preserve validation script
+        env:
+          REQUESTED_LAYOUT: ${{ inputs.layout_id }}
+          REQUESTED_GEOMETRY: ${{ inputs.layout_geometry }}
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/main" ] || [ "$REQUESTED_LAYOUT" != "ZGMw7" ] || [ "$REQUESTED_GEOMETRY" != "voyager" ]; then
+            echo "::error::Run this workflow on main for layout ZGMw7 and voyager."
+            exit 1
+          fi
+          python3 scripts/validate_layout.py ZGMw7
+          cp scripts/validate_layout.py "$RUNNER_TEMP/validate_layout.py"
+
+      - name: Checkout pure Oryx branch
+        run: |
+          git checkout -B oryx origin/oryx
+          python3 "$RUNNER_TEMP/validate_layout.py" ZGMw7 --oryx
 
       - name: Download layout source
         id: download-layout-source
@@ -60,6 +79,7 @@ jobs:
         run: |
           unzip -oj source.zip '*_source/*' -d ${{ github.event.inputs.layout_id }}
           rm source.zip
+          python3 "$RUNNER_TEMP/validate_layout.py" ZGMw7 --oryx
 
       - name: Commit and Push changes
         env:
@@ -67,7 +87,7 @@ jobs:
         run: |
           git config --local user.name "github-actions"
           git config --local user.email "github-actions@github.com"
-          git add .
+          git add -- ZGMw7
           printf "✨(oryx): %s\n" "$CHANGE_DESCRIPTION" | git commit -F - || echo "No layout change"
           git push
 
@@ -75,8 +95,12 @@ jobs:
         run: |
           git fetch origin main
           git checkout -B main origin/main
-          git merge -Xignore-all-space oryx
-          git push
+          if ! git merge -Xignore-all-space oryx; then
+            echo "::error::Resolve this merge on main: merge origin/oryx into main locally. Never merge main into oryx or use GitHub Resolve conflicts on an oryx-to-main PR."
+            exit 1
+          fi
+          python3 "$RUNNER_TEMP/validate_layout.py" ZGMw7
+          git push origin main
 
       - name: Update QMK firmware submodule to latest version (${{ steps.download-layout-source.outputs.firmware_version }})
         run: |
@@ -88,6 +112,9 @@ jobs:
           git add qmk_firmware
           git commit -m "✨(qmk): Update firmware" || echo "No QMK change"
           git push
+
+      - name: Verify chat integration before firmware build
+        run: python3 scripts/validate_layout.py ZGMw7
 
       - name: Build qmk docker image
         run: docker build -t qmk .
